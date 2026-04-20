@@ -1,0 +1,15 @@
+name: astrbot_plugin_pixiv_search
+desc: 魔法少女的寻宝魔法，支持通过 Pixiv 搜索精美图片
+help: 使用 "搜图 关键词" 或 "image:关键词" 搜索图片。
+version: 1.4.0
+author: Ruruka
+repo: https://github.com/AstrBotDevs
+config_schema:
+  cache_dir:
+    type: string
+    description: 图片缓存目录
+    default: "/AstrBot/data/plugins/astrbot_plugin_pixiv_search/cache"
+  proxy:
+    type: string
+    description: 代理地址 (例如 http://192.168.65.254:7890)
+    default: "http://192.168.65.254:7890"

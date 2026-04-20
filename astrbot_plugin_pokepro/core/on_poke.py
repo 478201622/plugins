@@ -1,0 +1,175 @@
+import copy
+import random
+
+from astrbot.api import logger
+from astrbot.api.message_components import Face
+from astrbot.core.message.components import At, Plain, Record
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
+from astrbot.core.star.context import Context
+
+from .config import PluginConfig
+from .cooldown import Cooldown
+from .llm import LLMService
+from .model import PokeEvent, PokeModel
+from .send_poke import PokeSender
+
+
+class GetPokeHandler:
+    def __init__(self, context: Context, config: PluginConfig, poke_sender: PokeSender):
+        self.context = context
+        self.cfg = config
+        self.sender = poke_sender
+        self.llm = LLMService(context, self.cfg)
+        self.cooldown = Cooldown(self.cfg)
+
+        # 响应池：模块 → handler
+        self.handlers = {
+            PokeModel.ANTIPOKE: self.respond_poke,
+            PokeModel.LLM: self.respond_llm,
+            PokeModel.FACE: self.respond_face,
+            PokeModel.MEME: self.respond_meme,
+            PokeModel.RECORD: self.respond_record,
+            PokeModel.BAN: self.respond_ban,
+            PokeModel.COMMAND: self.respond_cmd,
+        }
+
+        # 构建“可选模块池”
+        self._modules, self._weights = self._build_response_pool()
+
+    def _build_response_pool(self):
+        pool = []
+        for module, handler in self.handlers.items():
+            weight = self.cfg.weight_of(module)
+            if weight > 0:
+                pool.append((module, weight))
+
+        if not pool:
+            logger.warning("所有响应模块权重均为 0，戳一戳功能已禁用")
+            return (), ()
+
+        modules, weights = zip(*pool)
+        return modules, weights
+
+    async def handle(self, event: AiocqhttpMessageEvent):
+        """响应戳一戳事件"""
+        if not self._modules:
+            return
+
+        if event.get_extra("is_poked"):
+            return
+        evt = PokeEvent.from_event(event)
+        if not evt:
+            return
+
+        # 忽略自己发送的戳一戳
+        if evt.is_self_send:
+            return
+
+        # 冷却机制
+        if not self.cooldown.allow(evt.group_id, evt.user_id):
+            return
+
+        # 别人被戳则随机跟戳
+        if not evt.is_self_poked and random.random() < self.cfg.follow_prob:
+            await self.sender.event_send(event, target_ids=[evt.target_id], times=1)
+            return
+
+        # 只响应戳自己的戳
+        if not evt.is_self_poked:
+            return
+
+        module = random.choices(self._modules, self._weights, k=1)[0]
+        logger.debug(f"[戳一戳] 触发响应模块: {module}")
+        handler = self.handlers[module]
+
+        try:
+            async for msg in handler(event):
+                if msg is not None:
+                    yield msg
+        except Exception as e:
+            logger.error(f"执行戳一戳响应失败: {e}", exc_info=True)
+
+    # ========== 响应函数 ==========
+
+    async def respond_poke(self, event: AiocqhttpMessageEvent):
+        """反戳"""
+        await self.sender.event_send(
+            event,
+            target_ids=[event.get_sender_id()],
+            times=self.cfg.get_antipoke_times(),
+        )
+        event.stop_event()
+        yield None
+
+    async def respond_llm(self, event: AiocqhttpMessageEvent):
+        """调用llm回复"""
+        template = self.cfg.llm.template
+        prompt = await self.llm.build_prompt(event, template)
+        conversation = await self.llm.get_conversation(event)
+        yield event.request_llm(prompt=prompt, conversation=conversation)
+
+    async def respond_face(self, event: AiocqhttpMessageEvent):
+        """回复emoji(QQ表情)"""
+        face_id = self.cfg.get_face()
+        copy_count = self.cfg.get_face_copy_count()
+        faces_chain: list[Face] = [Face(id=face_id)] * copy_count
+        yield event.chain_result(faces_chain)  # type: ignore
+
+    async def respond_meme(self, event: AiocqhttpMessageEvent):
+        """回复表情包"""
+        img = self.cfg.get_image()
+        if img:
+            yield event.image_result(img)
+        else:
+            logger.warning("[戳一戳] 表情包池为空，无法发送图片")
+            yield None
+
+    async def respond_record(self, event: AiocqhttpMessageEvent):
+        """回复语音"""
+        audio_path = self.cfg.get_record()
+        if audio_path:
+            yield event.chain_result([Record(file=audio_path, url=audio_path)])
+        else:
+            logger.warning("[戳一戳] 语音池为空，无法发送语音")
+            yield None
+
+    async def respond_ban(self, event: AiocqhttpMessageEvent):
+        """禁言"""
+        cfg = self.cfg.ban
+        try:
+            await event.bot.set_group_ban(
+                group_id=int(event.get_group_id()),
+                user_id=int(event.get_sender_id()),
+                duration=self.cfg.get_ban_time(),
+            )
+            template = cfg.ban_template
+
+        except Exception:
+            template = cfg.ban_fail_template
+        finally:
+            prompt = await self.llm.build_prompt(event, template)
+            conversation = await self.llm.get_conversation(event)
+            yield event.request_llm(prompt=prompt, conversation=conversation)
+
+    async def respond_cmd(self, event: AiocqhttpMessageEvent):
+        """调用命令"""
+        evt = copy.copy(event)
+        evt.message_obj = copy.copy(event.message_obj)
+        evt._extras = dict(event.get_extra())
+        evt.clear_result()
+        event.stop_event()
+
+        cmd = self.cfg.get_command()
+
+        evt.message_obj.message = [At(qq=evt.get_self_id()), Plain(cmd)]
+        evt.message_obj.message_str = cmd
+
+        evt.is_at_or_wake_command = True
+        evt.message_str = cmd
+        evt.should_call_llm(True)
+        evt.set_extra("is_poked", True)
+
+        self.context.get_event_queue().put_nowait(evt)
+        yield None
