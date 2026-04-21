@@ -1,0 +1,71 @@
+{
+  "api_key": {
+    "description": "MiniMax API Key，在 https://platform.minimaxi.com/user-center/basic-information/interface-key 获取",
+    "type": "string",
+    "default": ""
+  },
+  "model": {
+    "description": "语音合成模型",
+    "type": "string",
+    "default": "speech-2.8-hd",
+    "enum": [
+      "speech-2.8-hd", "speech-2.8-turbo",
+      "speech-2.6-hd", "speech-2.6-turbo",
+      "speech-02-hd", "speech-02-turbo",
+      "speech-01-hd", "speech-01-turbo"
+    ]
+  },
+  "voice_id": {
+    "description": "音色ID",
+    "type": "string",
+    "default": "male-qn-qingse"
+  },
+  "speed": {
+    "description": "语速，范围 0.5-2.0",
+    "type": "float",
+    "default": 1.0
+  },
+  "vol": {
+    "description": "音量，范围 0.1-10.0",
+    "type": "float",
+    "default": 1.0
+  },
+  "pitch": {
+    "description": "音调，范围 -12 到 12",
+    "type": "int",
+    "default": 0
+  },
+  "emotion": {
+    "description": "情感",
+    "type": "string",
+    "default": "neutral",
+    "enum": ["neutral", "happy", "sad", "angry", "fearful", "disgusted", "surprised", "contemptuous"]
+  },
+  "sample_rate": {
+    "description": "采样率",
+    "type": "int",
+    "default": 32000
+  },
+  "bitrate": {
+    "description": "比特率",
+    "type": "int",
+    "default": 128000
+  },
+  "format": {
+    "description": "音频格式",
+    "type": "string",
+    "default": "mp3",
+    "enum": ["mp3", "wav", "flac", "pcm"]
+  },
+  "channel": {
+    "description": "声道数",
+    "type": "int",
+    "default": 1
+  },
+  "output_format": {
+    "description": "输出格式，hex 返回二进制，url 返回下载链接",
+    "type": "string",
+    "default": "hex",
+    "enum": ["hex", "url"]
+  }
+}
