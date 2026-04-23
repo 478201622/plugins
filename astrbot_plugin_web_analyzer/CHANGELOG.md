@@ -1,5 +1,168 @@
 # 更新日志
 
+### [v1.6.1] - 2026-04-21
+
+#### 🐛 Bug修复
+
+- **修复 httpx 代理参数废弃导致的 TypeError** (`core/analyzer`)
+  - `httpx>=0.24.0` 中 `proxies` (dict) 参数已废弃，改为 `proxy` (str) 参数
+  - 修复用户配置代理后因 API 不兼容导致请求失败的问题
+
+#### ✨ 功能增强
+
+- **新增智能截图等待策略** (`core/analyzer`, `_conf_schema.json`)
+  - 新增 `screenshot_wait_strategy` 配置项，支持三种等待策略：
+    - `fixed`：固定等待时间（默认，保持原有行为）
+    - `networkidle`：等待网络空闲后再截图，适应不同页面加载速度
+    - `smart`：先等待网络空闲（上限 5s），再附加 500ms 缓冲（推荐）
+  - 截图重试路径同样支持等待策略，确保一致性
+
+#### 📁 文件修改
+
+- `core/analyzer.py` - 修复代理参数、实现智能等待策略逻辑
+- `core/config_loader.py` - 加载 `screenshot_wait_strategy` 配置
+- `core/message_handler.py` - 传递等待策略到截图方法
+- `main.py` - 传递新配置到 MessageHandler
+- `_conf_schema.json` - 新增 `screenshot_wait_strategy` 配置项
+- `metadata.yaml` - 版本升级至 v1.6.1
+
+---
+
+### [v1.6.0] - 2026-04-19
+
+#### 🐛 Bug修复
+
+- **修复 Playwright 浏览器路径检测缺失** (`core/analyzer`)
+  - `_check_browser_installed_async` 的 `possible_exec_paths` 补充 `chrome-linux64/chrome` 和 `chrome-headless-shell-linux64/chrome-headless-shell` 路径
+  - 新版 Playwright 使用 `chrome-linux64` 替代旧版 `chrome-linux`，安装后检测会因路径不匹配而返回 False
+  - `common_paths` 列表同步补充 `chrome-linux64` 变体路径
+
+- **修复 `PLAYWRIGHT_BROWSERS_PATH` 环境变量设置时序错误** (`core/analyzer`)
+  - 将环境变量设置从 `async_playwright().start()` 之后移到之前
+  - Playwright 在初始化时即确定浏览器搜索路径，后续设置环境变量无效
+
+- **修复持久化路径误判目录为可执行文件** (`core/analyzer`)
+  - `_ensure_browser_installed` 中使用 `os.path.isfile()` 替代 `os.path.exists()`
+  - 防止目录路径（如 `playwright_browsers/`）被当作浏览器可执行文件路径，触发 EACCES 错误
+  - 安装后检测失败时不再保存目录路径到安装状态，仅在确认找到可执行文件时才标记 `installed: True`
+
+- **新增 Linux 环境浏览器系统依赖自动安装** (`core/analyzer`)
+  - 浏览器二进制安装成功后，在 Linux 环境下自动运行 `playwright install-deps chromium`
+  - 解决 Docker 环境缺少 `libnspr4.so` 等系统依赖库导致浏览器启动失败的问题
+  - 依赖安装失败不阻断主流程，仅记录警告日志
+
+#### 📁 文件修改
+
+- `core/analyzer.py` - 修复路径检测、环境变量时序、持久化路径校验、新增系统依赖安装
+- `metadata.yaml` - 版本升级至 v1.6.0
+
+---
+
+### [v1.5.9] - 2026-04-16
+
+#### 🐛 Bug修复
+
+- **修复 httpx.Limits 参数错误导致 TypeError 崩溃** (`core/analyzer`)
+  - `httpx.Limits` 不支持 `max_response_size` 参数，移除该无效参数
+  - 改为在 `_fetch_with_retry` 中通过 `Content-Length` 响应头检查响应大小（10MB 限制），防止超大响应导致 OOM
+
+- **修复新版平台适配器消息发送兼容性** (`core/plugin_helpers`)
+  - 优先使用 `bot.send_group_msg`/`bot.send_private_msg` 发送消息以获取 `message_id`（支持自动撤回）
+  - 使用 `hasattr` 检查 bot API 可用性，不可用时自动回退到 `event.send()`
+  - 移除 `send_result` 死代码，修正 `user_id` 为空时的日志显示
+
+#### 📁 文件修改
+
+- `core/analyzer.py` - 移除无效 httpx.Limits 参数，添加 Content-Length 响应大小检查
+- `core/plugin_helpers.py` - 优化 QQ 平台消息发送逻辑，优先使用 bot API 支持撤回，添加回退机制
+- `metadata.yaml` - 版本升级至 v1.5.9
+
+---
+
+### [v1.5.8] - 2026-04-14
+
+#### 🔒 安全修复
+
+- **修复 SSRF 漏洞** (`core/analyzer`, `core/utils.py`)
+  - 限制 URL 协议仅为 http/https，阻止其他协议（如 file、ftp 等）
+  - 新增私有/回环 IP 地址检测，使用 `ipaddress` 模块阻止对内网地址的访问
+  - 影响文件：`core/analyzer.py`、`core/utils.py`、`main.py`
+
+- **限制 HTTP 响应体大小** (`core/analyzer`)
+  - 限制 httpx 客户端最大响应体为 10MB，防止超大响应导致内存溢出
+  - 结合 `max_content_length` 配置实现双层防护
+
+- **代理配置日志脱敏** (`core/config_loader`)
+  - 代理配置校验日志中对 URL 认证信息进行脱敏处理，防止凭据泄露
+
+- **修复字符串格式化注入** (`core/command_handlers`, `core/llm_analyzer`, `core/config_loader`, `core/utils.py`)
+  - 对用户可控内容进行花括号转义，防止 `str.format()` 异常和信息注入
+  - 影响文件：`command_handlers.py`、`llm_analyzer.py`、`config_loader.py`、`utils.py`
+
+- **缓存文件命名升级** (`core/cache`)
+  - 缓存文件哈希算法从 MD5 升级为 SHA-256，提升安全性
+
+#### 🔄 重构
+
+- **截图配置结构重构** (`core/config_loader`)
+  - 将独立的 `screenshot_width` 和 `screenshot_height` 配置合并为嵌套的 `截图尺寸` 对象
+  - 更新配置兼容性映射以支持新的嵌套结构
+  - 保持默认值（1280x720）和向后兼容性
+
+#### 🐛 Bug修复
+
+- **优化浏览器池事件循环处理** (`core/analyzer`)
+  - 使用 `asyncio.get_running_loop()` 替代 `asyncio.get_event_loop()`，避免弃用警告
+
+- **移除潜在异步冲突** (`core/screenshot_temp_manager`)
+  - 移除 ScreenshotTempManager 中的自动清理任务启动，避免潜在的异步冲突
+
+#### 📁 文件修改
+
+- `core/analyzer.py` - SSRF 防护、响应大小限制、浏览器池优化
+- `core/cache.py` - 缓存哈希算法升级
+- `core/command_handlers.py` - 字符串格式化安全
+- `core/config_loader.py` - 截图配置重构、代理日志脱敏
+- `core/llm_analyzer.py` - 字符串格式化安全
+- `core/screenshot_temp_manager.py` - 移除潜在异步冲突
+- `core/utils.py` - URL 验证安全增强、字符串格式化安全
+- `main.py` - SSRF 防护集成
+
+---
+
+### [v1.5.7] - 2026-04-12
+
+#### ✨ 功能增强
+
+- **新增网页抓取模式配置** (`core/analyzer`, `_conf_schema.json`)
+  - 新增 `fetch_mode` 配置项，支持 `httpx`（默认）和 `playwright` 两种网页抓取模式
+  - Playwright 模式通过浏览器渲染获取网页内容，支持 JS 动态加载的页面
+  - Playwright 抓取失败时自动回退到 httpx 模式，确保可靠性
+  - 完善浏览器路径配置和重试逻辑
+
+- **新增 LLMTOOL 模式多 URL 处理策略** (`main.py`, `_conf_schema.json`)
+  - 新增 `llmtool_url_strategy` 配置项，支持三种策略：
+    - `auto_analyze`（默认）：自动分析所有检测到的 URL
+    - `llm_hint`：在消息中注入提示，引导 LLM 逐个分析
+    - `batch_tool`：注册批量分析工具供 LLM 自主调用
+  - 新增 `analyze_batch_urls_tool` LLM 工具方法，支持批量 URL 分析
+
+#### 🐛 Bug修复
+
+- **优化浏览器实例回收异常处理** (`core/analyzer`)
+  - 为浏览器实例回收操作添加异常捕获，避免因回收失败导致程序中断
+
+- **增强策略配置校验** (`main.py`)
+  - 为 `llmtool_url_strategy` 配置项增加有效性校验，无效时自动回退至默认值 `auto_analyze`
+  - 移除冗余的兜底日志逻辑，简化策略分支代码
+  - 在错误处理结果中补充 `has_screenshot` 字段，确保返回数据结构一致性
+
+#### 📝 其他
+
+- 更新 LICENSE 版权信息
+
+---
+
 ### [v1.5.6] - 2026-04-01
 
 #### ✨ 功能增强

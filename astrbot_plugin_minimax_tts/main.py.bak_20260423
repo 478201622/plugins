@@ -191,6 +191,14 @@ class MiniMaxTTSPlugin(Star):
             if not result or not hasattr(result, "chain") or not result.chain:
                 return
 
+            # 检查是否是 LLM 响应
+            try:
+                is_llm = result.is_llm_result()
+            except Exception:
+                is_llm = getattr(result, "result_content_type", None) == 20
+            if not is_llm:
+                return
+
             umo = self._get_umo_key(event)
             
             # 1. 提取标签内的内容用于合成语音

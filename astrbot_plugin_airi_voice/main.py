@@ -608,50 +608,6 @@ class AiriVoice(Star):
             self.last_pool_len = current_pool_len
             self.last_video_pool_len = current_video_pool_len
 
-        # 处理"随机"命令
-        if text.startswith("随机") and (self.voice_map or self.video_map):
-            if text in {"随机发条语音", "随机语音"}:
-                all_media = {**self.voice_map, **self.video_map}
-                if all_media:
-                    name = random.choice(list(all_media.keys()))
-                    matched_path = all_media.get(name)
-                    if matched_path:
-                        async for result in self._send_media_result(event, matched_path, name):
-                            yield result
-                else:
-                    yield event.plain_result("当前没有可用媒体～")
-                return
-            elif text in {"随机发条视频", "随机视频"}:
-                if self.video_map:
-                    name = random.choice(list(self.video_map.keys()))
-                    matched_path = self.video_map.get(name)
-                    if matched_path:
-                        async for result in self._send_media_result(event, matched_path, name):
-                            yield result
-                else:
-                    yield event.plain_result("当前没有可用视频～")
-                return
-            
-            # 随机匹配关键词
-            m = re.match(r"^随机\s*(.+)$", text)
-            if m:
-                kw = m.group(1).strip()
-                if not kw:
-                    return
-                all_media = {**self.voice_map, **self.video_map}
-                candidates = [name for name in all_media.keys() if kw in name]
-                if not candidates:
-                    yield event.plain_result(f"未找到包含「{kw}」的媒体")
-                    return
-                name = random.choice(candidates)
-                matched_path = all_media.get(name)
-                if matched_path:
-                    async for result in self._send_media_result(event, matched_path, name):
-                        yield result
-                else:
-                    yield event.plain_result("当前没有可用媒体～")
-                return
-
         keyword = text
         if self.trigger_mode == "prefix":
             match = re.search(r"^#voice\s+(.+)", text, re.I)

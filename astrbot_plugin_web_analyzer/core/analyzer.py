@@ -13,6 +13,7 @@
 
 import gc
 import io
+import ipaddress
 import re
 import time
 from urllib.parse import urljoin, urlparse
@@ -342,12 +343,8 @@ class WebAnalyzer:
             try:
                 import asyncio
 
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self._optimize_browser_pool())
-                else:
-                    # 如果事件循环未运行，记录警告但不抛出异常
-                    logger.warning("事件循环未运行，跳过浏览器实例池优化")
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._optimize_browser_pool())
             except Exception as e:
                 logger.error(f"执行浏览器实例池优化失败: {e}")
         except Exception as e:
@@ -366,11 +363,13 @@ class WebAnalyzer:
             返回WebAnalyzer实例自身，用于上下文管理
         """
         # 配置客户端参数
-        client_params = {"timeout": self.timeout}
+        client_params = {
+            "timeout": self.timeout,
+        }
 
         # 添加代理配置（如果有）
         if self.proxy:
-            client_params["proxies"] = {"http://": self.proxy, "https://": self.proxy}
+            client_params["proxy"] = self.proxy
 
         self.client = httpx.AsyncClient(**client_params)
         return self
@@ -492,9 +491,10 @@ class WebAnalyzer:
         """验证URL格式是否有效
 
         检查URL是否符合基本格式要求：
-        - 必须包含有效的协议（http/https）
+        - 必须包含有效的协议（仅允许 http/https）
         - 必须包含有效的域名或IP地址
-        - 必须能被正确解析
+        - URL中直接使用的IP地址不能是私有/回环地址（防止SSRF）
+        - 注意：不检查DNS解析结果，因为本地代理工具会劫持DNS
 
         Args:
             url: 要验证的URL字符串
@@ -504,7 +504,27 @@ class WebAnalyzer:
         """
         try:
             result = urlparse(url)
-            return all([result.scheme, result.netloc])
+            # 协议白名单，仅允许 http 和 https
+            if result.scheme.lower() not in ('http', 'https'):
+                return False
+            if not result.netloc:
+                return False
+            # 提取主机名
+            hostname = result.hostname
+            if not hostname:
+                return False
+            # 检查URL中直接使用的IP地址是否为私有/回环地址
+            # 仅检查字面IP，不检查DNS解析结果（代理工具会劫持DNS）
+            try:
+                addr = ipaddress.ip_address(hostname)
+                if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                    # 阻止内网/回环/链路本地地址；is_reserved 额外拦截 IANA 保留地址（如 IETF 协议保留、
+                    # 广播地址等），防止通过保留地址段绕过 SSRF 防护
+                    return False
+            except ValueError:
+                # 域名（非IP地址），直接通过
+                pass
+            return True
         except Exception:
             return False
 
@@ -623,6 +643,16 @@ class WebAnalyzer:
                     url, headers=headers, follow_redirects=True
                 )
                 response.raise_for_status()
+
+                # 检查响应大小，防止超大响应导致OOM（10MB限制）
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        content_length_int = int(content_length)
+                    except ValueError:
+                        content_length_int = None
+                    if content_length_int and content_length_int > 10 * 1024 * 1024:
+                        raise NetworkError(f"响应体过大({content_length_int}字节)，已跳过: {url}")
 
                 logger.info(
                     f"抓取网页成功: {url} (尝试 {attempt + 1}/{self.retry_count + 1})"
@@ -921,6 +951,7 @@ class WebAnalyzer:
         height: int = 720,
         full_page: bool = False,
         wait_time: int = 2000,
+        wait_strategy: str = "fixed",
         format: str = "jpeg",
     ) -> bytes:
         """使用Playwright捕获网页截图
@@ -966,6 +997,7 @@ class WebAnalyzer:
                     quality=quality,
                     full_page=full_page,
                     wait_time=wait_time,
+                    wait_strategy=wait_strategy,
                     format=format,
                 )
 
@@ -986,6 +1018,7 @@ class WebAnalyzer:
                     quality=quality,
                     full_page=full_page,
                     wait_time=wait_time,
+                    wait_strategy=wait_strategy,
                     format=format,
                 )
                 return screenshot_bytes
@@ -1252,6 +1285,10 @@ class WebAnalyzer:
                             # 尝试多个可能的可执行文件路径
                             possible_exec_paths = [
                                 latest_dir / "chrome-linux" / "chrome",
+                                latest_dir / "chrome-linux64" / "chrome",
+                                latest_dir
+                                / "chrome-headless-shell-linux64"
+                                / "chrome-headless-shell",
                                 latest_dir / "chrome" / "chrome",
                                 latest_dir / "chrome.exe",
                                 latest_dir / "msedge" / "msedge",
@@ -1271,7 +1308,16 @@ class WebAnalyzer:
                     / "chromium-*"
                     / "chrome-linux"
                     / "chrome",
+                    Path.home()
+                    / ".cache"
+                    / "ms-playwright"
+                    / "chromium-*"
+                    / "chrome-linux64"
+                    / "chrome",
                     Path("/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome"),
+                    Path(
+                        "/root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"
+                    ),
                     # Windows 系统路径
                     Path.home()
                     / "AppData"
@@ -1432,6 +1478,32 @@ class WebAnalyzer:
                     install_success = False
                     install_reason = f"进程返回码: {process.returncode}, 存在实际错误"
 
+            # 在 Linux 环境下安装系统依赖（如 libnspr4 等）
+            if install_success and sys.platform == "linux":
+                try:
+                    logger.info("正在安装浏览器系统依赖（install-deps）...")
+                    deps_process = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        "-m",
+                        "playwright",
+                        "install-deps",
+                        "chromium",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=env,
+                    )
+                    deps_stdout, deps_stderr = await asyncio.wait_for(
+                        deps_process.communicate(),
+                        timeout=300,
+                    )
+                    if deps_process.returncode == 0:
+                        logger.info("浏览器系统依赖安装成功")
+                    else:
+                        deps_err = deps_stderr.decode("utf-8", errors="replace")
+                        logger.warning(f"安装系统依赖失败（非致命）: {deps_err}")
+                except Exception as deps_error:
+                    logger.warning(f"安装系统依赖异常（非致命）: {deps_error}")
+
             # 验证浏览器可执行文件是否真实存在（使用自定义路径验证）
             if install_success:
                 try:
@@ -1536,7 +1608,7 @@ class WebAnalyzer:
             if saved_path:
                 import os
 
-                if os.path.exists(saved_path):
+                if os.path.isfile(saved_path):
                     self._detected_browser_path = saved_path
                     logger.debug(f"从持久化记录恢复浏览器路径: {saved_path}")
                     self._playwright_browser_checked = True
@@ -1639,10 +1711,8 @@ class WebAnalyzer:
                 # 保存安装状态
                 self._save_install_status(
                     {
-                        "installed": True,
-                        "install_path": browser_executable
-                        if installed
-                        else install_path,
+                        "installed": installed,
+                        "install_path": browser_executable if installed else "",
                         "install_time": time.time(),
                         "browser_type": "chromium",
                     }
@@ -1723,9 +1793,21 @@ class WebAnalyzer:
 
         logger.debug("创建新的浏览器实例")
 
+        # 如果有检测到的浏览器路径，使用它
+        if self._detected_browser_path and os.path.exists(self._detected_browser_path):
+            pass
+        else:
+            # 否则使用自定义路径（必须在 start() 之前设置环境变量）
+            custom_browser_path = self._get_browser_install_path()
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = custom_browser_path
+            logger.debug(f"设置 PLAYWRIGHT_BROWSERS_PATH={custom_browser_path}")
+
         playwright_instance = await async_playwright().start()
 
         # 构建启动参数
+        # 注意：--no-sandbox 和 --disable-setuid-sandbox 会降低浏览器安全隔离级别。
+        # 这些参数在容器/Docker环境中通常是必需的。如果运行在有适当隔离的环境中，
+        # 可以在有 root 权限时移除这些参数以恢复沙箱保护。
         launch_args = {
             "headless": True,
             "timeout": 20000,
@@ -1740,15 +1822,10 @@ class WebAnalyzer:
         # 隐藏IP：通过代理启动浏览器并屏蔽WebRTC
         self._apply_ip_hide_args(launch_args)
 
-        # 如果有检测到的浏览器路径，使用它
+        # 使用检测到的浏览器路径（如果有）
         if self._detected_browser_path and os.path.exists(self._detected_browser_path):
             launch_args["executable_path"] = self._detected_browser_path
             logger.debug(f"使用检测到的浏览器路径: {self._detected_browser_path}")
-        else:
-            # 否则使用自定义路径（环境变量方式）
-            custom_browser_path = self._get_browser_install_path()
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = custom_browser_path
-            logger.debug(f"设置 PLAYWRIGHT_BROWSERS_PATH={custom_browser_path}")
 
         browser = await playwright_instance.chromium.launch(**launch_args)
 
@@ -1763,7 +1840,8 @@ class WebAnalyzer:
         quality: int,
         full_page: bool,
         wait_time: int,
-        format: str,
+        wait_strategy: str = "fixed",
+        format: str = "jpeg",
     ) -> bytes:
         """执行实际的截图操作
 
@@ -1775,6 +1853,7 @@ class WebAnalyzer:
             quality: 截图质量
             full_page: 是否全页截图
             wait_time: 等待时间（毫秒）
+            wait_strategy: 等待策略(fixed/networkidle/smart)
             format: 截图格式
 
         Returns:
@@ -1812,8 +1891,20 @@ class WebAnalyzer:
             # 导航到目标URL
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-            # 等待页面加载完成
-            await page.wait_for_timeout(wait_time)
+            # 根据策略等待页面加载
+            if wait_strategy == "networkidle":
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=wait_time if wait_time > 0 else 30000)
+                except Exception:
+                    logger.info("networkidle等待超时，继续截图")
+            elif wait_strategy == "smart":
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=min(wait_time if wait_time > 0 else 5000, 5000))
+                except Exception:
+                    logger.info("smart模式networkidle超时，使用固定等待")
+                await page.wait_for_timeout(500)
+            else:  # fixed
+                await page.wait_for_timeout(wait_time)
 
             # 构建截图参数
             screenshot_params = {
@@ -1864,7 +1955,8 @@ class WebAnalyzer:
         quality: int,
         full_page: bool,
         wait_time: int,
-        format: str,
+        wait_strategy: str = "fixed",
+        format: str = "jpeg",
     ) -> bytes:
         """处理截图过程中的错误
 
@@ -1943,6 +2035,7 @@ class WebAnalyzer:
                 quality=quality,
                 full_page=full_page,
                 wait_time=wait_time,
+                wait_strategy=wait_strategy,
                 format=format,
             )
 
