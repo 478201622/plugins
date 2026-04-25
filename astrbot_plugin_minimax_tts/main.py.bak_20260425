@@ -12,8 +12,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 logger = logging.getLogger("MiniMaxTTS")
 
 # [tts_speak] 标签正则
-# [tts_speak] 标签正则，支持 @emotion 前缀如 [tts_speak] @happy 内容 [/tts_speak]
-TTS_SPEAK_PATTERN = re.compile(r'\[tts_speak\]\s*(?:@(\w+)\s+)?(.+?)\[/tts_speak\]', re.DOTALL | re.IGNORECASE)
+TTS_SPEAK_PATTERN = re.compile(r'\[tts_speak\](.+?)\[/tts_speak\]', re.DOTALL | re.IGNORECASE)
 
 @register("MiniMaxTTS", "Ruruka", "MiniMax TTS 语音合成插件", "1.2.0")
 class MiniMaxTTSPlugin(Star):
@@ -85,9 +84,9 @@ class MiniMaxTTSPlugin(Star):
             logger.error(f"[MiniMaxTTS] 音频下载异常: {e}")
             return None
 
-    async def _call_minimax_api(self, text: str, emotion: Optional[str] = None) -> Optional[bytes]:
+    async def _call_minimax_api(self, text: str) -> Optional[bytes]:
         """调用 MiniMax API（官方 v2 结构）"""
-        logger.info(f"[MiniMaxTTS] 正在请求 API: {text[:30]}..., emotion={emotion}")
+        logger.info(f"[MiniMaxTTS] 正在请求 API: {text[:30]}...")
         
         headers = {
             "Authorization": f"Bearer {self.config['api_key']}",
@@ -113,8 +112,7 @@ class MiniMaxTTSPlugin(Star):
         
         # speech-2.6 以上支持情绪参数
         if "2.6" in self.config['model'] or "2.8" in self.config['model']:
-            # 优先使用标签指定的情绪，否则使用配置默认值
-            payload["voice_setting"]["emotion"] = emotion if emotion else self.config['emotion']
+            payload["voice_setting"]["emotion"] = self.config['emotion']
         
         try:
             async with aiohttp.ClientSession() as session:
@@ -152,30 +150,22 @@ class MiniMaxTTSPlugin(Star):
 
     @filter.regex(r"(?:^|.*?)mtts\s+(.+)")
     async def tts_command(self, event: AstrMessageEvent):
-        """TTS 命令: /mtts [@emotion] <文本>"""
+        """TTS 命令: /mtts <文本>"""
         msg = event.message_str.strip()
         m = re.search(r"(?:^|.*?)mtts\s+(.+)", msg, re.I)
         text = m.group(1).strip() if m else ""
         
         if not text:
-            return event.plain_result("用法: /mtts [@happy|@sad|@angry|@neutral] <文本>")
+            return event.plain_result("用法: /mtts <文本>")
 
         if not self.config.get('api_key'):
             logger.error("[MiniMaxTTS] API Key 未配置")
             return event.plain_result("❌ API Key 未配置，请检查配置文件")
 
-        # 解析 @emotion 标签
-        emotion = None
-        emotion_match = re.match(r'@(\w+)\s+(.+)', text, re.DOTALL)
-        if emotion_match:
-            emotion = emotion_match.group(1).lower()
-            text = emotion_match.group(2).strip()
-            logger.info(f"[MiniMaxTTS] 手动命令指定情绪: {emotion}")
-
         text = text.replace("-", " ")
         
         try:
-            audio_data = await self._call_minimax_api(text, emotion)
+            audio_data = await self._call_minimax_api(text)
             
             if audio_data:
                 temp_path = self._save_audio_temp(audio_data)
@@ -211,14 +201,10 @@ class MiniMaxTTSPlugin(Star):
                     
             match = TTS_SPEAK_PATTERN.search(full_text)
             if match:
-                emotion = match.group(1)  # @emotion 标签，可能为 None
-                tts_content = match.group(2).strip()
-                # 存入缓存：包含情绪和文本
-                MiniMaxTTSPlugin._tts_tag_cache[umo] = {
-                    "text": tts_content,
-                    "emotion": emotion.lower() if emotion else None
-                }
-                logger.debug(f"[TTS] 已缓存 sid={umo}, emotion={emotion}, content={tts_content[:30]}...")
+                tts_content = match.group(1).strip()
+                # 存入缓存
+                MiniMaxTTSPlugin._tts_tag_cache[umo] = tts_content
+                logger.debug(f"[TTS] 已缓存 sid={umo}, content={tts_content[:30]}...")
             else:
                 # 如果没有找到标签，清理缓存并直接返回（不做任何修改）
                 MiniMaxTTSPlugin._tts_tag_cache.pop(umo, None)
@@ -261,16 +247,14 @@ class MiniMaxTTSPlugin(Star):
 
             umo = self._get_umo_key(event)
             # 从缓存读取内容
-            cached = MiniMaxTTSPlugin._tts_tag_cache.pop(umo, None)
-            if not cached:
+            cached_tts = MiniMaxTTSPlugin._tts_tag_cache.pop(umo, None)
+            if not cached_tts:
                 return # 没有缓存内容，直接返回
 
-            tts_text = cached["text"]
-            tts_emotion = cached.get("emotion")
-            logger.info(f"[TTS] 开始合成标签内容: {tts_text[:30]}..., emotion={tts_emotion}")
+            logger.info(f"[TTS] 开始合成标签内容: {cached_tts[:30]}...")
 
-            # 1. 调用 API 合成语音（传入情绪参数）
-            audio_data = await self._call_minimax_api(tts_text, tts_emotion)
+            # 1. 调用 API 合成语音
+            audio_data = await self._call_minimax_api(cached_tts)
             if not audio_data:
                 logger.warning("[TTS] API 返回数据为空")
                 return
